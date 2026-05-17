@@ -35,7 +35,7 @@ class FallbackPipeline:
         self.board_height_meters = board_height_meters
         self.latency_multiplier = latency_multiplier
         # TODO: fine-tune your arguments here
-        self.tracker = KalmanTracker(process_noise=1.0, measurement_noise=0.5)
+        self.tracker = KalmanTracker(process_noise=0.5, measurement_noise=0.1)
         self._last_time: float | None = None
         self._lost_count: int = 0
 

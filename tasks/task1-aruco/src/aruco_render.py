@@ -14,13 +14,13 @@ CAMERA_PARAMS_PATH = TASK_ROOT / "output" / "camera_params.json"
 # TODO(student): fill in your own ArUco video path.
 # use a video where the marker is clear and not too motion-blurred
 # keep the marker dictionary and physical length below consistent with this video
-ARUCO_VIDEO_PATH = TASK_ROOT / "data" / "aruco" / "aruco.mp4"
+ARUCO_VIDEO_PATH = TASK_ROOT / "data" / "aruco" / "aruco_video.mp4"
 
 # TODO(student): fill in your own ArUco settings.
 # choose the same dictionary that was used to print the marker
 # measure the black marker side length in meters and store it in MARKER_LENGTH_METERS
 ARUCO_DICTIONARY = "DICT_4X4_50"
-MARKER_LENGTH_METERS = 0.05
+MARKER_LENGTH_METERS = 0.1
 
 ARUCO_OUTPUT_VIDEO_PATH = TASK_ROOT / "output" / "aruco_result.mp4"
 
@@ -122,29 +122,56 @@ def _is_valid_pose_result(result):
 def estimate_marker_pose(marker_corners, marker_length_meters, camera_matrix, dist_coeffs):
     object_points = create_marker_object_points(marker_length_meters)
 
-    # TODO(student): Estimate one marker pose with OpenCV solvePnP.
-    # Input: detected 2D marker corners, marker size, camera_matrix, and dist_coeffs.
-    # Output: rvec and tvec.
-    # `object_points` has already been prepared for you.
-    raise NotImplementedError("estimate_marker_pose is not implemented")
+    image_points = marker_corners.reshape(4, 2)
+    success, rvec, tvec = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    
+    if not success:
+        return None, None
+    return rvec, tvec
 
 
 def render_virtual_object(frame, rvec, tvec, camera_matrix, dist_coeffs, vertices, faces):
-    # TODO(student): Render the loaded OBJ model on top of the ArUco marker.
-    # Input geometry from load_obj(...):
-    #   vertices: list of 3D points, equivalent to an array with shape (N, 3).
-    #   faces: list of triangle vertex indices, equivalent to an array with shape (M, 3).
-    # Output: the rendered frame.
-    #
-    # 1. Convert vertices and faces to numpy arrays if needed.
-    # 2. Normalize / scale / translate the model to fit above the marker.
-    # 3. Use cv2.projectPoints(...) to project 3D vertices to 2D image points.
-    # 4. For each face, collect its three projected 2D vertices.
-    # 5. Draw the triangle edges or filled triangle on frame.
-    #
-    # Model size normalization can be tricky at first; we recommend asking AI for help.
+    if not vertices or not faces:
+        return frame
+        
+    # 1. 转换为 Numpy Array 并计算包围盒
+    verts = np.array(vertices, dtype=np.float32)
+    min_b = np.min(verts, axis=0)
+    max_b = np.max(verts, axis=0)
+    center = (max_b + min_b) / 2.0
+    size = max_b - min_b
     
-    raise NotImplementedError("render_virtual_object is not implemented")
+    # 2. 将模型中心平移至原点
+    verts -= center
+    
+    # 2.5 旋转模型：让模型“站”起来
+    # 大部分 3D 模型（如 african_head）是以 Y 轴为向上的头顶方向
+    # 而 ArUco 坐标系是以 Z 轴为垂直于平面的向上方向
+    # 所以我们需要绕 X 轴旋转 90 度，让原先的 Y 轴变成 Z 轴
+    y = verts[:, 1].copy()
+    z = verts[:, 2].copy()
+    verts[:, 1] = -z
+    verts[:, 2] = y
+    
+    # 3. 缩放模型：使得模型的最大跨度与 Marker 的真实物理大小匹配
+    scale = MARKER_LENGTH_METERS / max(size)
+    verts *= scale
+    
+    # 4. 调整高度：将模型的底部正好放到 Marker 所在的平面 (Z=0)
+    # 在标准 ArUco 坐标系中，Z 轴通常垂直于表面向外
+    min_z = np.min(verts[:, 2])
+    verts[:, 2] -= min_z
+    
+    # 5. 投影：将三维点投影回当前帧的二维像素坐标
+    imgpts, _ = cv2.projectPoints(verts, rvec, tvec, camera_matrix, dist_coeffs)
+    imgpts = np.int32(imgpts).reshape(-1, 2)
+    
+    # 6. 渲染：将三角面片绘制为绿色线框
+    for face in faces:
+        pts = np.array([imgpts[face[0]], imgpts[face[1]], imgpts[face[2]]])
+        cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 255), thickness=1)
+        
+    return frame
 
 
 def process_frame(frame, dictionary, camera_matrix, dist_coeffs, vertices, faces):

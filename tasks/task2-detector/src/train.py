@@ -28,11 +28,20 @@ class MNISTClassifier(nn.Module):
     def __init__(self, input_size: int = 28 * 28, num_classes: int = 10) -> None:
         super().__init__()
         # TODO(student): fill in your custom model architectures
-        raise NotImplementedError("MNIST classifier model logic not implemented!")
+        #28*28展开然后两个FeedForward全连接层
+        self.flatten=nn.Flatten()
+        self.linear_relu_stack=nn.Sequential(
+            nn.Linear(input_size,128),
+            nn.ReLU(),
+            nn.Linear(128,num_classes)
+        )
+
 
     def forward(self, inputs):
         # TODO(student): fill in your forward process according to your model
-        raise NotImplementedError("MNIST classifier forward logic not implemented!")
+        x=self.flatten(inputs)
+        logits=self.linear_relu_stack(x)
+        return logits
 
 
 def select_training_device(torch_module) -> str:
@@ -43,25 +52,73 @@ def select_training_device(torch_module) -> str:
     #     return "mps" for Apple Silicon GPU training
     # otherwise:
     #     return "cpu" so training still works without an accelerator
-    raise NotImplementedError("select_training_device is not implemented")
+    if torch_module.cuda.is_available():
+        return "cuda"
+    elif hasattr(torch_module.backends,"mps")and torch_module.backends.mps.is_available():
+        return"mps"
+    else:
+        return "cpu"
 
 
 def train_mnist_classifier(dataset_dir: Path, output_path: Path) -> Path:
     
     from torch.utils.data import DataLoader, random_split
     import torchvision
-    # TODO(student): Train the MNIST digit classifier used by model.py.
-    # device = select_training_device(torch)
-    # move the model and each batch to device
-    # read training images and labels from dataset_dir
-    # split examples into training and validation sets
-    # preprocess every image the same way model.preprocess_mnist_crop does
-    # model = MNISTClassifier()
-    # choose loss function, optimizer, batch size, and number of epochs
-    # train until validation accuracy is stable
-    # save the trained model weights or serialized estimator to output_path
-    # return output_path
-    raise NotImplementedError("MNIST training is not implemented")
+    from torchvision import transforms
+    device=select_training_device(torch)
+    print(f"Using device:{device}")
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,),(0.3081,))
+    ])
+    dataset=torchvision.datasets.MNIST(root=dataset_dir.parent,train=True,download=True,transform=transform)
+    train_size=50000
+    val_size=len(dataset)-train_size
+    train_dataset,val_dataset=random_split(dataset,[train_size,val_size])
+    train_loader=DataLoader(train_dataset,batch_size=64,shuffle=True)
+    val_loader=DataLoader(val_dataset,batch_size=64,shuffle=False)
+    
+    model=MNISTClassifier().to(device)
+    loss_fn=nn.CrossEntropyLoss()
+    optimizer=torch.optim.Adam(model.parameters(),lr=1e-3)
+    epochs=5
+    for t in range(epochs):
+        print(f"Epoch {t+1}\n-------------------------------")
+
+        model.train()
+        for batch, (X, y) in enumerate(train_loader):
+            X, y = X.to(device), y.to(device) # 把数据丢进 GPU/CPU
+            
+            # 前向传播
+            pred = model(X)
+            loss = loss_fn(pred, y)
+            
+            # 反向传播与优化
+            optimizer.zero_grad() # 清空上一次的梯度
+            loss.backward()       # 反向传播计算新梯度
+            optimizer.step()      # 更新模型权重
+            
+            if batch % 100 == 0:
+                print(f"Loss: {loss.item():>7f}  [{batch * len(X):>5d}/{len(train_dataset):>5d}]")
+        # 验证阶段（看模型有没有过拟合）
+        model.eval()
+        test_loss, correct = 0, 0
+        with torch.no_grad(): # 验证时不计算梯度，省显存
+            for X, y in val_loader:
+                X, y = X.to(device), y.to(device)
+                pred = model(X)
+                test_loss += loss_fn(pred, y).item()
+                correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+        
+        test_loss /= len(val_loader)
+        correct /= len(val_dataset)
+        print(f"Validation Error: Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
+    # 7. 训练完毕，保存模型权重
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_path)
+    return output_path
+            
+
 
 
 def parse_args() -> argparse.Namespace:

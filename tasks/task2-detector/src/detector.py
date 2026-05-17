@@ -107,43 +107,64 @@ def crop_bbox(image: np.ndarray, corner_candidates: Sequence[Sequence[Point2D]])
 
 
 def order_corners(corners: Sequence[Point2D]) -> CornerSet:
-    # TODO(student): Sort the four target corners into a stable order.
-    # Input: four 2D corners in arbitrary order.
-    # Output: corners ordered as top-left, top-right, bottom-right, bottom-left.
-    # Compute a stable ordering rule that works for the target board geometry.
-    raise NotImplementedError("order_corners is not implemented")
+    sorted_x=sorted(corners,key=lambda p:p[0])
+    left_points=sorted_x[:2]
+    right_points=sorted_x[2:]
+    left_points=sorted(left_points,key=lambda p:p[1])
+    top_left=left_points[0]
+    bottom_left=left_points[1]
+    right_points=sorted(right_points,key=lambda p:p[1])
+    top_right=right_points[0]
+    bottom_right=right_points[1]
+    return top_left,top_right,bottom_right,bottom_left
+
 
 
 def detect_bbox(image: ImageLike, threshold: int = 200) -> list[CornerSet]:
-    # TODO(student): Detect board candidates.
-    # image_array = convert image to an OpenCV-compatible uint8 array
-    # red_mask = threshold reddish pixels into a binary image
-    # optionally clean red_mask with morphology so small noisy blobs disappear
-    # contours = cv2.findContours(red_mask)
-    # corner_candidates = []
-    # for each contour:
-    #     if contour area is too small:
-    #         continue
-    #     polygon = cv2.approxPolyDP(contour, epsilon, closed=true)
-    #     if polygon does not have exactly 4 edges/corners:
-    #         continue
-    #     if polygon is not convex or has unreasonable aspect ratio:
-    #         continue
-    #     corners = order_corners(the four polygon vertices)
-    #     append corners to corner_candidates
-    # return corner_candidates
-    raise NotImplementedError("detect_bbox is not implemented")
+    image_array=np.array(image,dtype=np.uint8)
+    r=image_array[:,:,0]
+    g=image_array[:,:,1]
+    b=image_array[:,:,2]
+    red_mask = ((r > threshold) & (r > g + 20) & (r > b + 20)).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    corner_candidates = []
+    for contour in contours:
+        area=cv2.contourArea(contour)
+        if area<100:
+            continue
+        epsilon=0.04*cv2.arcLength(contour,True)
+        polygon=cv2.approxPolyDP(contour,epsilon,closed=True)
+        if len(polygon)!=4:
+            continue
+        pts = [(float(p[0][0]), float(p[0][1])) for p in polygon]
+        corners = order_corners(pts)
+        corner_candidates.append(corners)
+        
+    return corner_candidates
 
 
 def detect_mnist_board(image: ImageLike, threshold: int = 200) -> list[Detection]:
-    # TODO(student): Classify detected MNIST-board candidates and filter them.
-    # Input: one RGB image and a threshold parameter.
-    # Output: a list of Detection objects.
-    # Step 1: call detect_bbox(...) to get board candidates.
-    # Step 2: call crop_bbox(...) to extract candidate crops.
-    # Step 3: call classify_mnist_digit(...) on each crop and filter low-confidence results.
-    # Step 4: package the remaining results as Detection objects.
-    raise NotImplementedError("detect_mnist_board is not implemented")
+
+    corner_candidates = detect_bbox(image, threshold)
+    crops = crop_bbox(image, corner_candidates)
+    
+    detections = []
+    for crop, corners in zip(crops, corner_candidates):
+        digit, confidence = classify_mnist_digit(crop)
+        
+        if confidence > 0.4:
+            bbox = _bbox_from_corners(corners)
+            
+            detections.append(Detection(
+                class_id=digit,
+                confidence=float(confidence),
+                bbox=bbox,
+                corners=corners
+            ))
+            
+    return detections
 
 
 def solve_pnp(
@@ -153,23 +174,37 @@ def solve_pnp(
     board_height_meters: float,
     dist_coeffs: Sequence[float] | None = None,
 ) -> list[Detection]:
-    # TODO(student): Fill rvec and tvec for every valid Detection.
-    # half_width = board_width_meters / 2
-    # half_height = board_height_meters / 2
-    # object_points = four physical board corners as float32:
-    #     (-half_width, -half_height, 0)
-    #     (half_width, -half_height, 0)
-    #     (half_width, half_height, 0)
-    #     (-half_width, half_height, 0)
-    # camera_array = camera_matrix as a 3x3 float64 array
-    # dist_array = zero distortion if dist_coeffs is not provided
-    # result = []
-    # for each detection:
-    #     image_points = detection.corners as a float32 4x2 array
-    #     call cv2.solvePnP with object_points, image_points, camera_array, and dist_array
-    #     if OpenCV reports failure:
-    #         skip this detection or raise a clear error
-    #     fill detection.rvec and detection.tvec with the OpenCV result
-    #     append detection to result
-    # return result
-    raise NotImplementedError("solve_pnp is not implemented")
+
+    half_width = board_width_meters / 2.0
+    half_height = board_height_meters / 2.0
+    object_points = np.array([
+        [-half_width, -half_height, 0],
+        [ half_width, -half_height, 0],
+        [ half_width,  half_height, 0],
+        [-half_width,  half_height, 0],
+    ], dtype=np.float32)
+
+    camera_array = np.array(camera_matrix, dtype=np.float64)
+    
+    if dist_coeffs is None:
+        dist_array = np.zeros(5, dtype=np.float64)
+    else:
+        dist_array = np.array(dist_coeffs, dtype=np.float64)
+
+    result = []
+    for detection in detections:
+        image_points = np.array(detection.corners, dtype=np.float32)
+        success, rvec, tvec = cv2.solvePnP(
+            object_points, image_points, camera_array, dist_array
+        )
+        
+        if success:
+            detection.rvec = rvec
+            detection.tvec = tvec
+            result.append(detection)
+            
+    return result
+
+    
+
+

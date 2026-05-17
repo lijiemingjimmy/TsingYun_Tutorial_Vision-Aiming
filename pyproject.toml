@@ -25,3 +25,6 @@ pythonpath = [".", "tasks/task2-detector/src"]
 
 [tool.uv]
 package = false
+
+[tool.pyright]
+extraPaths = ["tasks/task2-detector/src"]
