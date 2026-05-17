@@ -70,53 +70,48 @@ class FallbackPipeline:
 
             # Estimate 3D positions for all detections
             positions = [self._estimate_position(d, camera_matrix) for d in good]
+            
+            h, w = image.shape[:2]
+            center_x, center_y = w / 2.0, h / 2.0
+            max_dist_sq = (w/2)**2 + (h/2)**2
 
             best_idx = -1
+            best_score = -9999.0
+            
+            # 获取当前追踪器的预测位置，用于计算粘性
+            pred_pos = self.tracker.get_position() if self.tracker.is_tracking else None
 
-            def score_target(i: int):
-                h, w = image.shape[:2]
-                center_x, center_y = w / 2.0, h / 2.0
-                d = good[i]
+            for i, d in enumerate(good):
                 dist_sq = (d.bbox.center[0] - center_x)**2 + (d.bbox.center[1] - center_y)**2
-                max_dist_sq = (w/2)**2 + (h/2)**2
-                return (d.class_id, d.confidence, -dist_sq / max_dist_sq)
+                dist_norm = dist_sq / max_dist_sq  # 归一化距离 [0, 1]
+                
+                # 统一评分公式：数字大加分，距离远扣分，置信度高加分
+                # 距离最远扣 5 分，意味着屏幕边缘的 8 等同于中心的 3
+                score = d.class_id - (dist_norm * 5.0) + (d.confidence * 2.0)
+                
+                # 追踪粘性 (Hysteresis) 机制
+                if self.tracker.is_tracking and self._locked_class_id == d.class_id and pred_pos is not None:
+                    cur_x, cur_y, cur_z = positions[i]
+                    pred_x, pred_y, pred_z = pred_pos
+                    # 检查 3D 物理距离，误差在 2.0 米内认为是同一个追踪目标
+                    if (cur_x - pred_x)**2 + (cur_y - pred_y)**2 + (cur_z - pred_z)**2 < 4.0:
+                        score += 4.0  # 给予 4.0 的粘性分！新靶子必须比当前靶子“香” 4 分以上才能抢走锁定
+                        
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
 
-            if self.tracker.is_tracking and self._locked_class_id is not None:
-                # 看看视野里有没有远远比当前锁定的香的靶子？
-                global_best_idx = max(range(len(good)), key=score_target)
-                global_best_class_id = good[global_best_idx].class_id
+            target_d = good[best_idx]
 
-                # 切换代价（Switching Cost）：卡尔曼滤波器会丢失之前的速度历史，需要几帧重新收敛。
-                # 所以除非遇到高出 3 分以上（比如打3遇到6，打5遇到9）的靶子，否则不轻易换目标
-                if global_best_class_id >= self._locked_class_id + 3:
-                    self.tracker.reset()
-                    self._locked_class_id = None
-                else:
-                    # 优先寻找与当前锁定数字相同的目标
-                    same_class_indices = [i for i, d in enumerate(good) if d.class_id == self._locked_class_id]
-                    if same_class_indices:
-                        # 使用最近邻找出真实的同一个靶子
-                        pred_x, pred_y, pred_z = self.tracker.get_position()
-                        best_idx = min(
-                            same_class_indices,
-                            key=lambda i: (positions[i][0] - pred_x)**2
-                            + (positions[i][1] - pred_y)**2
-                            + (positions[i][2] - pred_z)**2,
-                        )
-                    else:
-                        # 锁定的数字不见了，断开追踪器，准备重新寻找最优目标
-                        self.tracker.reset()
-
-            if best_idx == -1:
-                # 如果没在追踪，或者原目标丢失/主动抛弃，从全场选一个最优解进行 Lock
-                best_idx = max(range(len(good)), key=score_target)
-                self._locked_class_id = good[best_idx].class_id
-                self.tracker.reset() # 强制重置，因为换了新目标
+            # 目标发生了实质性切换，或者第一次追踪，需要重置滤波器
+            if not self.tracker.is_tracking or self._locked_class_id != target_d.class_id:
+                self.tracker.reset()
+                self._locked_class_id = target_d.class_id
 
             cur_x, cur_y, cur_z = positions[best_idx]
-
             self.tracker.update(cur_x, cur_y, cur_z, dt)
             pred_x, pred_y, pred_z = self.tracker.predict(self.latency * self.latency_multiplier)
+
 
             # Clamp
             pred_z = max(1.0, min(pred_z, 200.0))
