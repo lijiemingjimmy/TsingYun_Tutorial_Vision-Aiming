@@ -30,16 +30,15 @@ def preprocess_mnist_crop(board_crop: ImageLike) -> np.ndarray:
     if not isinstance(board_crop, np.ndarray):
         board_crop = np.array(board_crop, dtype=np.uint8)
 
-    # 2. 转换为灰度图 (模型只需要单通道输入)
+    # 2. 提取数字并二值化
     if len(board_crop.shape) == 3:
-        # 测试图像可能是RGB或者BGR，转灰度最安全是用均值或者兼容的cvtColor
-        gray = cv2.cvtColor(board_crop, cv2.COLOR_RGB2GRAY)
+        # 游戏中数字是白色的(R,G,B都较高)，边框是红色的(R高，G,B低)
+        # 取通道最小值，红框会变为0，只保留发白的数字部分
+        min_c = np.min(board_crop, axis=2)
+        # 考虑到画面可能偏暗，最大像素值可能只有90左右，使用30作为阈值
+        _, binary = cv2.threshold(min_c, 30, 255, cv2.THRESH_BINARY)
     else:
-        gray = board_crop
-        
-    # 2. 二值化，去除红色的边框和暗色背景，只保留纯白色的数字
-    # 假设数字是接近255的白色，红框灰度在100左右，背景更暗，这里用个150的阈值
-    _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        _, binary = cv2.threshold(board_crop, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     
     # 3. 调整图像大小为 28x28 像素 (MNIST数据集和我们模型的标准尺寸)
     resized = cv2.resize(binary, (28, 28))
