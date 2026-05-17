@@ -35,9 +35,10 @@ class FallbackPipeline:
         self.board_height_meters = board_height_meters
         self.latency_multiplier = latency_multiplier
         # TODO: fine-tune your arguments here
-        self.tracker = KalmanTracker(process_noise=0.5, measurement_noise=0.1)
+        self.tracker = KalmanTracker(process_noise=0.5, measurement_noise=0.05)
         self._last_time: float | None = None
         self._lost_count: int = 0
+        self._locked_class_id: int | None = None
 
     def process_rgb_image(self, image: np.ndarray, camera_matrix: Matrix3x3, timestamp: float = 0.0) -> PipelineResult:
         try:
@@ -62,6 +63,7 @@ class FallbackPipeline:
                         used_fallback=False, reason="coasting",
                     )
                 self.tracker.reset()
+                self._locked_class_id = None
                 return self._center_fallback(image, camera_matrix, f"no target in {len(detections)} detections")
 
             self._lost_count = 0
@@ -69,27 +71,49 @@ class FallbackPipeline:
             # Estimate 3D positions for all detections
             positions = [self._estimate_position(d, camera_matrix) for d in good]
 
-            # Nearest-neighbor: use current filtered position
-            if self.tracker.is_tracking:
-                pred_x, pred_y, pred_z = self.tracker.get_position()
-                best_idx = min(
-                    range(len(positions)),
-                    key=lambda i: (positions[i][0] - pred_x)**2
-                    + (positions[i][1] - pred_y)**2
-                    + (positions[i][2] - pred_z)**2,
-                )
-            else:
-                # No prior: pick the one closest to image center (most central)
+            best_idx = -1
+
+            def score_target(i: int):
                 h, w = image.shape[:2]
-                best_idx = min(
-                    range(len(good)),
-                    key=lambda i: (good[i].bbox.center[0] - w/2)**2
-                    + (good[i].bbox.center[1] - h/2)**2,
-                )
+                center_x, center_y = w / 2.0, h / 2.0
+                d = good[i]
+                dist_sq = (d.bbox.center[0] - center_x)**2 + (d.bbox.center[1] - center_y)**2
+                max_dist_sq = (w/2)**2 + (h/2)**2
+                return (d.class_id, d.confidence, -dist_sq / max_dist_sq)
+
+            if self.tracker.is_tracking and self._locked_class_id is not None:
+                # 看看视野里有没有远远比当前锁定的香的靶子？
+                global_best_idx = max(range(len(good)), key=score_target)
+                global_best_class_id = good[global_best_idx].class_id
+
+                # 切换代价（Switching Cost）：卡尔曼滤波器会丢失之前的速度历史，需要几帧重新收敛。
+                # 所以除非遇到高出 3 分以上（比如打3遇到6，打5遇到9）的靶子，否则不轻易换目标
+                if global_best_class_id >= self._locked_class_id + 3:
+                    self.tracker.reset()
+                    self._locked_class_id = None
+                else:
+                    # 优先寻找与当前锁定数字相同的目标
+                    same_class_indices = [i for i, d in enumerate(good) if d.class_id == self._locked_class_id]
+                    if same_class_indices:
+                        # 使用最近邻找出真实的同一个靶子
+                        pred_x, pred_y, pred_z = self.tracker.get_position()
+                        best_idx = min(
+                            same_class_indices,
+                            key=lambda i: (positions[i][0] - pred_x)**2
+                            + (positions[i][1] - pred_y)**2
+                            + (positions[i][2] - pred_z)**2,
+                        )
+                    else:
+                        # 锁定的数字不见了，断开追踪器，准备重新寻找最优目标
+                        self.tracker.reset()
+
+            if best_idx == -1:
+                # 如果没在追踪，或者原目标丢失/主动抛弃，从全场选一个最优解进行 Lock
+                best_idx = max(range(len(good)), key=score_target)
+                self._locked_class_id = good[best_idx].class_id
+                self.tracker.reset() # 强制重置，因为换了新目标
 
             cur_x, cur_y, cur_z = positions[best_idx]
-
-            # TODO: optionally enable a hard reset here when `class_id` changes
 
             self.tracker.update(cur_x, cur_y, cur_z, dt)
             pred_x, pred_y, pred_z = self.tracker.predict(self.latency * self.latency_multiplier)
