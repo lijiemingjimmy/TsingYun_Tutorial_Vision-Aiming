@@ -32,7 +32,6 @@ log/
 *.log
 *.tmp
 *.pth
-*.npz
 *.onnx
 tasks/task2-detector/data/MNIST/
 tasks/task2-detector/models/*
